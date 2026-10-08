@@ -1,0 +1,35 @@
+# This Service's selector is the traffic switch for blue-green deployments.
+# Whichever "version" label it points to (blue or green) receives 100% of
+# production traffic. The blue-green-deploy.sh script patches the selector
+# with `kubectl patch` to flip traffic instantly.
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-active
+  labels:
+    app: backend
+spec:
+  selector:
+    app: backend
+    version: blue # <-- flipped between "blue" and "green" during deployment
+  ports:
+    - port: 80
+      targetPort: 5000
+  type: ClusterIP
+---
+# Extra "preview" service always pointing at green, so you can run smoke
+# tests against the new version BEFORE flipping production traffic to it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-preview
+  labels:
+    app: backend
+spec:
+  selector:
+    app: backend
+    version: green
+  ports:
+    - port: 80
+      targetPort: 5000
+  type: ClusterIP

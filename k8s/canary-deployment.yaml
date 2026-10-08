@@ -1,0 +1,107 @@
+# Canary release setup.
+#
+# Both "backend-stable" and "backend-canary" Deployments share the SAME
+# label (app: backend) and are fronted by ONE Service ("backend-active").
+# Kubernetes Services load-balance across all matching Pods, so the
+# proportion of traffic each version receives is controlled simply by the
+# RATIO of pod replica counts between stable and canary
+# (e.g. 9 stable pods + 1 canary pod ≈ 10% of traffic to canary).
+#
+# canary-deploy.sh recalculates and applies these replica counts for you.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend-stable
+  labels:
+    app: backend
+    track: stable
+spec:
+  replicas: 9
+  selector:
+    matchLabels:
+      app: backend
+      track: stable
+  template:
+    metadata:
+      labels:
+        app: backend
+        track: stable
+    spec:
+      containers:
+        - name: backend
+          image: ${STABLE_IMAGE_FULL}
+          ports:
+            - containerPort: 5000
+          envFrom:
+            - secretRef:
+                name: backend-secrets
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 5000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: '100m'
+              memory: '128Mi'
+            limits:
+              cpu: '500m'
+              memory: '256Mi'
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend-canary
+  labels:
+    app: backend
+    track: canary
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+      track: canary
+  template:
+    metadata:
+      labels:
+        app: backend
+        track: canary
+    spec:
+      containers:
+        - name: backend
+          image: ${CANARY_IMAGE_FULL}
+          ports:
+            - containerPort: 5000
+          envFrom:
+            - secretRef:
+                name: backend-secrets
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 5000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: '100m'
+              memory: '128Mi'
+            limits:
+              cpu: '500m'
+              memory: '256Mi'
+---
+# Single Service in front of BOTH stable and canary pods (matches "app: backend"
+# only, not "track"), so it load-balances across whichever pods exist.
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-active
+  labels:
+    app: backend
+spec:
+  selector:
+    app: backend
+  ports:
+    - port: 80
+      targetPort: 5000
+  type: ClusterIP

@@ -1,0 +1,49 @@
+# GREEN deployment = the NEW version being rolled out.
+# Traffic is switched to it (via the Service selector) only after it
+# passes health checks and smoke tests.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend-green
+  labels:
+    app: backend
+    version: green
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend
+      version: green
+  template:
+    metadata:
+      labels:
+        app: backend
+        version: green
+    spec:
+      containers:
+        - name: backend
+          image: ${BACKEND_IMAGE_FULL}
+          ports:
+            - containerPort: 5000
+          envFrom:
+            - secretRef:
+                name: backend-secrets
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 5000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: '100m'
+              memory: '128Mi'
+            limits:
+              cpu: '500m'
+              memory: '256Mi'

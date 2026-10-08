@@ -1,0 +1,363 @@
+# =============================================================================
+# GitLab CI/CD Pipeline — MERN Stack (MongoDB, Express, React, Node.js)
+# =============================================================================
+# This pipeline demonstrates a realistic, production-style workflow:
+#   1. install     -> install dependencies for backend & frontend
+#   2. lint         -> static code analysis (ESLint) - "code quality" gate #1
+#   3. test         -> automated unit tests + coverage for backend & frontend
+#   4. code_quality -> GitLab Code Quality report + SonarCloud (optional)
+#   5. build        -> build & push Docker images to the GitLab Container Registry
+#   6. deploy       -> deploy to Kubernetes: staging -> blue/green -> canary -> prod
+#
+# Read PIPELINE_GUIDE.md / the Word document for a full beginner explanation
+# of every single job below.
+# =============================================================================
+
+stages:
+  - install
+  - lint
+  - test
+  - code_quality
+  - build
+  - deploy_staging
+  - deploy_production
+
+# -----------------------------------------------------------------------------
+# Global variables — override the CI/CD ones in Settings > CI/CD > Variables
+# -----------------------------------------------------------------------------
+variables:
+  NODE_VERSION: '18'
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: '/certs'
+  # GitLab's built-in Container Registry for this project
+  BACKEND_IMAGE: '$CI_REGISTRY_IMAGE/backend'
+  FRONTEND_IMAGE: '$CI_REGISTRY_IMAGE/frontend'
+  IMAGE_TAG: '$CI_COMMIT_SHORT_SHA'
+  KUBE_NAMESPACE_STAGING: 'mern-staging'
+  KUBE_NAMESPACE_PROD: 'mern-production'
+
+# -----------------------------------------------------------------------------
+# Reusable rules — WHEN should each job run?
+# -----------------------------------------------------------------------------
+.only_main: &only_main
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+.only_mr_and_main: &only_mr_and_main
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+
+# Cache node_modules between jobs/pipelines using the lockfile as the key
+.backend_cache: &backend_cache
+  key:
+    files:
+      - backend/package-lock.json
+  paths:
+    - backend/node_modules/
+  policy: pull-push
+
+.frontend_cache: &frontend_cache
+  key:
+    files:
+      - frontend/package-lock.json
+  paths:
+    - frontend/node_modules/
+  policy: pull-push
+
+# =============================================================================
+# STAGE 1: INSTALL
+# =============================================================================
+install:backend:
+  stage: install
+  image: node:${NODE_VERSION}-alpine
+  <<: *only_mr_and_main
+  cache:
+    <<: *backend_cache
+  script:
+    - cd backend
+    - npm ci --prefer-offline
+  artifacts:
+    paths:
+      - backend/node_modules/
+    expire_in: 1 hour
+
+install:frontend:
+  stage: install
+  image: node:${NODE_VERSION}-alpine
+  <<: *only_mr_and_main
+  cache:
+    <<: *frontend_cache
+  script:
+    - cd frontend
+    - npm ci --prefer-offline
+  artifacts:
+    paths:
+      - frontend/node_modules/
+    expire_in: 1 hour
+
+# =============================================================================
+# STAGE 2: LINT — automated code quality checks (ESLint + Prettier)
+# =============================================================================
+lint:backend:
+  stage: lint
+  image: node:${NODE_VERSION}-alpine
+  <<: *only_mr_and_main
+  needs: ['install:backend']
+  dependencies:
+    - install:backend
+  script:
+    - cd backend
+    - npm run lint
+    - npm run format:check
+
+lint:frontend:
+  stage: lint
+  image: node:${NODE_VERSION}-alpine
+  <<: *only_mr_and_main
+  needs: ['install:frontend']
+  dependencies:
+    - install:frontend
+  script:
+    - cd frontend
+    - npm run lint
+    - npm run format:check
+
+# =============================================================================
+# STAGE 3: TEST — automated unit/integration tests with coverage
+# =============================================================================
+test:backend:
+  stage: test
+  image: node:${NODE_VERSION}-alpine
+  <<: *only_mr_and_main
+  needs: ['install:backend']
+  dependencies:
+    - install:backend
+  variables:
+    MONGO_URI: 'mongodb://mongo:27017/mern_cicd_test'
+    NODE_ENV: 'test'
+  services:
+    - name: mongo:6
+      alias: mongo
+  script:
+    - cd backend
+    - npm run test:coverage
+  coverage: '/All files[^|]*\|[^|]*\s+([\d\.]+)/'
+  artifacts:
+    when: always
+    reports:
+      junit: backend/junit.xml
+      coverage_report:
+        coverage_format: cobertura
+        path: backend/coverage/cobertura-coverage.xml
+    paths:
+      - backend/coverage/
+    expire_in: 1 week
+
+test:frontend:
+  stage: test
+  image: node:${NODE_VERSION}-alpine
+  <<: *only_mr_and_main
+  needs: ['install:frontend']
+  dependencies:
+    - install:frontend
+  script:
+    - cd frontend
+    - npm run test:coverage
+  coverage: '/All files[^|]*\|[^|]*\s+([\d\.]+)/'
+  artifacts:
+    when: always
+    paths:
+      - frontend/coverage/
+    expire_in: 1 week
+
+# =============================================================================
+# STAGE 4: CODE QUALITY — deeper static analysis
+# =============================================================================
+# Uses GitLab's built-in Code Quality template (runs a linter-based scanner
+# and produces a report GitLab displays directly on the Merge Request).
+code_quality:
+  stage: code_quality
+  <<: *only_mr_and_main
+  image: docker:24.0.5
+  services:
+    - docker:24.0.5-dind
+  variables:
+    DOCKER_HOST: 'tcp://docker:2375'
+    DOCKER_TLS_CERTDIR: ''
+  allow_failure: true
+  script:
+    - docker run --rm
+        -v "$PWD":/code
+        -v /var/run/docker.sock:/var/run/docker.sock
+        "registry.gitlab.com/gitlab-org/ci-cd/codequality:latest"
+        /code --format json > gl-code-quality-report.json || true
+  artifacts:
+    reports:
+      codequality: gl-code-quality-report.json
+    expire_in: 1 week
+
+# Optional: SonarQube / SonarCloud scan for deeper quality gates
+# (requires SONAR_TOKEN and SONAR_HOST_URL CI/CD variables to be set)
+sonarqube_check:
+  stage: code_quality
+  image: sonarsource/sonar-scanner-cli:latest
+  <<: *only_main
+  allow_failure: true
+  script:
+    - sonar-scanner
+        -Dsonar.projectKey=$CI_PROJECT_NAME
+        -Dsonar.sources=backend/src,frontend/src
+        -Dsonar.host.url=$SONAR_HOST_URL
+        -Dsonar.login=$SONAR_TOKEN
+  rules:
+    - if: '$SONAR_TOKEN'
+      when: on_success
+    - when: never
+
+# =============================================================================
+# STAGE 5: BUILD — build Docker images & push to GitLab Container Registry
+# =============================================================================
+build:backend:
+  stage: build
+  image: docker:24.0.5
+  services:
+    - docker:24.0.5-dind
+  <<: *only_main
+  needs: ['test:backend', 'lint:backend']
+  script:
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    - docker build
+        -t "$BACKEND_IMAGE:$IMAGE_TAG"
+        -t "$BACKEND_IMAGE:latest"
+        ./backend
+    - docker push "$BACKEND_IMAGE:$IMAGE_TAG"
+    - docker push "$BACKEND_IMAGE:latest"
+
+build:frontend:
+  stage: build
+  image: docker:24.0.5
+  services:
+    - docker:24.0.5-dind
+  <<: *only_main
+  needs: ['test:frontend', 'lint:frontend']
+  script:
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    - docker build
+        --build-arg REACT_APP_API_URL="$REACT_APP_API_URL"
+        --build-arg REACT_APP_VERSION="$IMAGE_TAG"
+        -t "$FRONTEND_IMAGE:$IMAGE_TAG"
+        -t "$FRONTEND_IMAGE:latest"
+        ./frontend
+    - docker push "$FRONTEND_IMAGE:$IMAGE_TAG"
+    - docker push "$FRONTEND_IMAGE:latest"
+
+# =============================================================================
+# STAGE 6a: DEPLOY TO STAGING — every merge to main auto-deploys to staging
+# =============================================================================
+deploy:staging:
+  stage: deploy_staging
+  image: bitnami/kubectl:1.30
+  <<: *only_main
+  needs: ['build:backend', 'build:frontend']
+  environment:
+    name: staging
+    url: https://staging.example.com
+  script:
+    - kubectl config use-context $KUBE_CONTEXT
+    - kubectl create namespace $KUBE_NAMESPACE_STAGING --dry-run=client -o yaml | kubectl apply -f -
+    - export BACKEND_IMAGE_FULL="$BACKEND_IMAGE:$IMAGE_TAG"
+    - export FRONTEND_IMAGE_FULL="$FRONTEND_IMAGE:$IMAGE_TAG"
+    - envsubst < k8s/backend-deployment.yaml | kubectl apply -n $KUBE_NAMESPACE_STAGING -f -
+    - envsubst < k8s/frontend-deployment.yaml | kubectl apply -n $KUBE_NAMESPACE_STAGING -f -
+    - kubectl apply -n $KUBE_NAMESPACE_STAGING -f k8s/backend-service.yaml
+    - kubectl apply -n $KUBE_NAMESPACE_STAGING -f k8s/frontend-service.yaml
+    - kubectl rollout status deployment/backend -n $KUBE_NAMESPACE_STAGING --timeout=120s
+    - kubectl rollout status deployment/frontend -n $KUBE_NAMESPACE_STAGING --timeout=120s
+
+# =============================================================================
+# STAGE 6b: BLUE-GREEN DEPLOYMENT TO PRODUCTION (manual approval gate)
+# =============================================================================
+# Strategy: deploy the new version as the "green" deployment alongside the
+# live "blue" one, run smoke tests against green, then flip the Service
+# selector so all traffic switches to green instantly. Blue is kept around
+# so we can roll back in seconds by flipping the selector back.
+deploy:production:blue_green:
+  stage: deploy_production
+  image: bitnami/kubectl:1.30
+  <<: *only_main
+  needs: ['deploy:staging']
+  when: manual
+  environment:
+    name: production
+    url: https://app.example.com
+  script:
+    - kubectl config use-context $KUBE_CONTEXT
+    - export BACKEND_IMAGE_FULL="$BACKEND_IMAGE:$IMAGE_TAG"
+    - export FRONTEND_IMAGE_FULL="$FRONTEND_IMAGE:$IMAGE_TAG"
+    - chmod +x scripts/blue-green-deploy.sh
+    - ./scripts/blue-green-deploy.sh
+
+rollback:production:blue_green:
+  stage: deploy_production
+  image: bitnami/kubectl:1.30
+  <<: *only_main
+  needs: ['deploy:production:blue_green']
+  when: manual
+  environment:
+    name: production
+    action: stop
+  script:
+    - kubectl config use-context $KUBE_CONTEXT
+    - chmod +x scripts/rollback.sh
+    - ./scripts/rollback.sh
+
+# =============================================================================
+# STAGE 6c: CANARY RELEASE TO PRODUCTION (manual, gradual rollout)
+# =============================================================================
+# Strategy: send a small % of production traffic (e.g. 10%) to the new
+# version while most users stay on the stable version. Gradually increase
+# the canary's traffic share as confidence grows, or roll back instantly if
+# error rates spike.
+deploy:production:canary:
+  stage: deploy_production
+  image: bitnami/kubectl:1.30
+  <<: *only_main
+  needs: ['deploy:staging']
+  when: manual
+  environment:
+    name: production-canary
+    url: https://app.example.com
+  script:
+    - kubectl config use-context $KUBE_CONTEXT
+    - export BACKEND_IMAGE_FULL="$BACKEND_IMAGE:$IMAGE_TAG"
+    - chmod +x scripts/canary-deploy.sh
+    - ./scripts/canary-deploy.sh 10   # start canary at 10% traffic
+
+promote:production:canary:
+  stage: deploy_production
+  image: bitnami/kubectl:1.30
+  <<: *only_main
+  needs: ['deploy:production:canary']
+  when: manual
+  environment:
+    name: production-canary
+  script:
+    - kubectl config use-context $KUBE_CONTEXT
+    - chmod +x scripts/canary-deploy.sh
+    - ./scripts/canary-deploy.sh 100  # promote canary to 100% traffic
+
+rollback:production:canary:
+  stage: deploy_production
+  image: bitnami/kubectl:1.30
+  <<: *only_main
+  needs: ['deploy:production:canary']
+  when: manual
+  environment:
+    name: production-canary
+    action: stop
+  script:
+    - kubectl config use-context $KUBE_CONTEXT
+    - chmod +x scripts/canary-deploy.sh
+    - ./scripts/canary-deploy.sh 0    # send canary traffic back to 0%

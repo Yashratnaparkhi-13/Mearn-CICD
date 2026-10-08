@@ -1,0 +1,10 @@
+node_modules/
+build/
+dist/
+coverage/
+*.log
+.env
+.env.local
+.DS_Store
+junit.xml
+gl-code-quality-report.json
