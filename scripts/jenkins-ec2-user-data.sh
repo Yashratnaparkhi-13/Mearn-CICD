@@ -10,6 +10,7 @@ cat > /etc/yum.repos.d/jenkins.repo <<'REPO'
 [jenkins]
 name=Jenkins-stable
 baseurl=https://pkg.jenkins.io/redhat-stable
+gpgkey=https://pkg.jenkins.io/redhat-stable/jenkins.io-2023.key
 gpgcheck=1
 REPO
 rpm --import https://pkg.jenkins.io/redhat-stable/jenkins.io-2023.key
