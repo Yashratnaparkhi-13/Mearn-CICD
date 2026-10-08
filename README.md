@@ -64,15 +64,18 @@ cd frontend && npm test
 
 The root `Jenkinsfile` runs backend and frontend tests, builds and pushes both
 images to Amazon ECR, and deploys the staging namespace to the
-`mern-cicd-eks` cluster in `ap-south-1`. Configure the Jenkins agent with AWS
-permissions for ECR and EKS, plus `aws`, `kubectl`, `envsubst`, Docker, Node.js,
-and npm. Add a Jenkins **Secret text** credential named `mern-mongo-uri` with
-the MongoDB connection string before running the pipeline. Do not commit or
-paste the connection string into source files.
+`mern-cicd-eks` cluster in `ap-south-1`. The pipeline deploys a single-replica
+MongoDB StatefulSet with an encrypted EBS-backed volume; its generated password
+is stored in AWS Secrets Manager and is never committed to Git.
 
-The frontend is served through an AWS load balancer and proxies `/api` requests
-to the in-cluster backend service, so the frontend image does not need a
-hard-coded public backend URL.
+The frontend is exposed using a NodePort on the public worker node and proxies
+`/api` requests to the in-cluster backend service, so the frontend image does
+not need a hard-coded public backend URL. This simple staging setup prints the
+frontend URL in the Jenkins build output.
+
+For a Jenkins agent running on the prepared EC2 instance, use its attached IAM
+role for ECR/EKS access. The Jenkins web console is restricted to Systems
+Manager port forwarding rather than exposed to the public internet.
 
 ## Deployment strategies included
 
